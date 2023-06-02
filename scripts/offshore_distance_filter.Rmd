@@ -1,0 +1,131 @@
+---
+title: "Filter_by_offshore_distance"
+output:
+  html_document:
+      toc: true
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## Intro
+
+We want to subset a dataset based on the distance from the coast. All near-shore points need to be excluded from the datasets, and based on this we want to explore the datasets.
+
+
+## Create filter polygon
+
+### Belgian part of the North Sea polygon
+
+load libraries
+
+```{r mregions2, echo=FALSE}
+remotes::install_github('lifewatch/mregions2')
+library(mapview)
+library(mregions2)
+library(sf)
+library(dplyr)
+library(tidyr)
+```
+Get the Belgian Part of the North Sea (also called 'Belgisch continentaal plat' or 'BCP')
+```{r bcp}
+BCP <- gaz_search(3293) %>% gaz_geometry()
+mapview(BCP)
+```
+### Coastal area polygon
+
+We will use a buffer around the baseline to remove the 'coastal' areas.
+
+Get the baseline of Belgium
+```{r download_baseline, echo=FALSE}
+# Data from Agency Maritime Services and Coast (MDK)
+# https://www.agentschapmdk.be/nl/publicaties#maritieme-grenzen-belgie
+
+temp <- tempfile()
+download.file("https://www.agentschapmdk.be/nl/bijlage/ec7480f9-7bdf-42a9-bcc1-d58f5a2a280c/maritieme-grenzen-be-december2018-4",temp)
+unzip(temp, exdir = 'baseline')
+bline <- st_read("baseline/SHAPE_basislijn BE -december2018.shp")
+mapview(bline)
+unlink(temp)
+
+```
+
+Now create a 1.5 km buffer around the baseline & union buffer with BCP.
+You can change the buffer distance here, to have another distance from the coast.
+```{r buffer_intersect}
+buffer <- st_buffer(x = st_transform(bline, crs = 3812), # buffer, but transform to Lambert2008 (EPSG:3812) for distance
+                    dist = 1500 ) # buffer distance in m
+
+mapview(buffer)
+
+BCP_1500 <- st_difference(BCP, st_transform(buffer, crs = 4326)) # transform to WGS84 (EPSG)
+mapview(BCP_1500)
+
+```
+### Clean up polygon
+
+There are still a remnant polygons in the harbour of Zeebrugge (and the harbour of Oostende), remove these.
+```{r cleanp_poly}
+#
+BCP_1500_split <- BCP_1500 %>%
+  st_cast(., "POLYGON") %>%             # convert multipolygon to seperate polygons
+  mutate(area = st_area(the_geom)) %>%  # calculate area of separate polygons
+  top_n(1, area)                        # only select largest polygon
+
+mapview(BCP_1500_split)
+```
+
+## Dataset
+
+### load data
+
+Load the data (assumed to be in the project/working directory).
+Note that this is a subset, as the full dataset (>700MB) is too large to load?
+Note that I also subset the data to only include 2012.
+```{r}
+
+data <- read.csv("shiptemp_subset.csv",
+                 sep = ";",
+                 na.strings = "-999.0",
+                 colClasses = c("POSIXct", # GPSDate to POSIXct format
+                                "numeric",
+                                "numeric",
+                                "numeric",
+                                "numeric",
+                                "numeric",
+                                "numeric")
+                 )
+data_sf <- data %>%
+  drop_na('longitude') %>% # drop rows where lon is empty
+  drop_na('Latitude') %>%  # drop rows where lat is empty
+  mutate(year = format(GPSDate, format="%Y")) %>% # add year column
+  filter(year == "2012") %>%                    # SELECT ONLY DATA IN 2012
+  st_as_sf(coords = c("longitude", "Latitude"), # convert to sf object
+           crs = 4326)
+```
+
+## Subset data
+Subset the data based on the polygon
+```{r}
+data_BCP_1500 <- st_filter(data_sf, BCP_1500_split)
+plot(st_geometry(BCP_1500_split))
+plot(st_geometry(data_BCP_1500), col = 'red', add = TRUE)
+```
+(note that I don't load the data in a mapview, as this would make the html markdown output quite heavy)
+
+## create some plots
+
+Create some plots similar to Jonas' plots
+```{r}
+library(ggplot2)
+ggplot(data_BCP_1500, aes(GPSDate, SBE21Temperature)) +
+  geom_point(colour = "red",
+             size = 0.2) +
+  geom_hline(yintercept = 21,
+             linetype = "dashed") +
+  facet_wrap(vars(year),
+             scales = "free_x") +
+  theme_minimal()
+```
+
